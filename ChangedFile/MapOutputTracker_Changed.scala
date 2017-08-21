@@ -420,14 +420,6 @@ private[spark] class MapOutputTrackerMaster(conf: SparkConf,
     cachedSerializedStatuses.contains(shuffleId) || mapStatuses.contains(shuffleId)
   }
 
-  private[this] var _useHosts: Boolean = conf.getBoolean("spark.shuffle.preferredloc.usesmallestcost", false)
-
-  //println(conf.get("spark.shuffle.preferredloc.usesmallestcost"))
-  def useHosts: Boolean = _useHosts
-
-  def useHosts_(value: Boolean): Unit = {
-    _useHosts = value
-  }
 
   def getPreferredLocationsForShuffle(dep: ShuffleDependency[_, _, _], partitionId: Int)
   : Seq[String] = {
@@ -456,10 +448,10 @@ private[spark] class MapOutputTrackerMaster(conf: SparkConf,
    *                          for it to be considered large.
    */
   def getLocationsWithLargestOutputs(
-    shuffleId: Int,
-    reducerId: Int,
-    numReducers: Int,
-    fractionThreshold: Double)
+                                      shuffleId: Int,
+                                      reducerId: Int,
+                                      numReducers: Int,
+                                      fractionThreshold: Double)
   : Option[Array[BlockManagerId]] = {
 
     val statuses = mapStatuses.get(shuffleId).orNull
@@ -498,172 +490,21 @@ private[spark] class MapOutputTrackerMaster(conf: SparkConf,
     None
   }
 
-  def getLocationsWithSmallestCost(
-                                    shuffleId: Int,
-                                    reducerId: Int,
-                                    numReducers: Int,
-                                    fractionThreshold: Double)
-  : Option[Array[BlockManagerId]] = {
 
+
+
+/** compute sdidd of each shuffle phase*/
+  def computeReduceDistribution(shuffleId: Int): Array[Long] = {
     val statuses = mapStatuses.get(shuffleId).orNull
-    if (statuses != null) {
-      statuses.synchronized {
-        if (statuses.nonEmpty) {
-          // HashMap to add up sizes of all blocks at the same location
-          val locs = new HashMap[BlockManagerId, Long]
-          var totalOutputSize = 0L
-          var mapIdx = 0
-
-          while (mapIdx < statuses.length) {
-            val status = statuses(mapIdx)
-            // status may be null here if we are called between registerShuffle, which creates an
-            // array with null entries for each output, and registerMapOutputs, which populates it
-            // with valid status entries. This is possible if one thread schedules a job which
-            // depends on an RDD which is currently being computed by another thread.
-            if (status != null) {
-              val blockSize = status.getSizeForBlock(reducerId)
-              if (blockSize > 0) {
-                //[nodeloc,size]
-                println("map" + mapIdx + " to reduce " + reducerId + " output is :" + blockSize)
-                locs(status.location) = locs.getOrElse(status.location, 0L) + blockSize
-                totalOutputSize += blockSize
-              }
-            }
-            mapIdx = mapIdx + 1
-          }
-          val nodelist = statuses.map(_.location).distinct
-          val loctoDistance = new HashMap[String, Array[String]]
-
-          val costs = new HashMap[BlockManagerId, Long]
-          for (reduceloc <- nodelist) {
-            var cost = 0L
-            val dists = new HashMap[BlockManagerId, Int]
-            for (maploc <- nodelist) {
-              if (maploc.toString == reduceloc.toString) {
-                //dists(maploc) = dists.getOrElse(maploc)
-                dists.put(maploc, 0)
-                cost = cost + locs(maploc)
-              } else {
-                dists.put(maploc, 1)
-                //cost = cost + locs(maploc)
-              }
-            }
-            costs.put(reduceloc, cost)
-            println("reduce " + reducerId + " locate at " + reduceloc.toString + " with cost :" + cost)
-          }
-          val topLocs = costs.toList.sortBy(_._2).take(3).map(_._1)
-          //          val topLocs = locs.filter { case (loc, size) =>
-          //            size.toDouble / totalOutputSize >= fractionThreshold
-          //          }
-          // Return if we have any locations which satisfy the required threshold
-          if (topLocs.nonEmpty) {
-            //return Some(topLocs.keys.toArray)
-            return Some(topLocs.toArray)
-          }
-        }
-      }
-    }
-    None
-  }
-
-
-  private lazy val structureUtil = new StructureUtil(conf)
-
-  def computeHostDist(maploc: String, reduceloc: String, hostDist: mutable.HashMap[Tuple2[String, String],Int]): Unit = {
-    val loctuple = {
-      if (maploc < reduceloc) {
-        (maploc, reduceloc)
-      } else {
-        (reduceloc, maploc)
-      }
-    }
-    if (hostDist.get(loctuple).isEmpty) {
-      if (maploc == reduceloc) {
-        //dists(maploc) = dists.getOrElse(maploc)
-        hostDist.put(loctuple, 0)
-      } else {
-        val mapRack = structureUtil.getRackForHost(maploc)
-        val reduceRack = structureUtil.getRackForHost(reduceloc)
-        if (!mapRack.isEmpty && !reduceRack.isEmpty) {
-          if (mapRack == reduceRack) {
-            hostDist.put(loctuple, 1)
-            //cost = cost + locs(maploc)
-          } else {
-            val mapCluster = structureUtil.getClusterForRack(mapRack)
-            val reduceCluster = structureUtil.getClusterForRack(reduceRack)
-            //                    println("map: " + mapRack + "->" + mapCluster)
-            //                    println("redcue: " + reduceRack + "->" + reduceCluster)
-
-            if (!mapCluster.isEmpty && !reduceCluster.isEmpty) {
-              if (mapCluster == reduceCluster) {
-                hostDist.put(loctuple, 2)
-                //cost = cost + locs(maploc) * 2
-              } else {
-                val mapCenter = structureUtil.getCenterForCluster(mapCluster)
-                val reduceCenter = structureUtil.getCenterForCluster(reduceCluster)
-                if (!mapCenter.isEmpty && !reduceCenter.isEmpty) {
-                  if (mapCenter == reduceCenter) {
-                    hostDist.put(loctuple, 3)
-                    //cost = cost + locs(maploc) * 3
-                  } else {
-                    hostDist.put(loctuple, 4)
-                    //cost = cost + locs(maploc) * 4
-                  }
-                } else {
-                  logWarning("The Center for Cluster " + mapCluster + " or " + reduceCluster + " cannot be found in Configuration")
-                  hostDist.put(loctuple, 3)
-                  //cost = cost + locs(maploc) * 3
-                }
-              }
-            } else {
-              logWarning("The Cluster for Rack " + mapRack + " or " + reduceRack + " cannot be found in Configuration")
-              hostDist.put(loctuple, 2)
-              //cost = cost + locs(maploc) * 2
-            }
-
-          }
-        } else {
-          logWarning("The Rack for Host " + maploc + " or " + reduceloc + " cannot be found in Configuration")
-          hostDist.put(loctuple, 1)
-          //cost = cost + locs(maploc) * 1
-        }
-      }
-    }
-  }
-  private var hostDist = new mutable.HashMap[Tuple2[String, String], Int]
-  private var attemptshuffle = 0;
-  def computeAllHostDist(shuffleId: Int):  Unit ={
-    val status = mapStatuses.get(shuffleId).orNull
-    val hosts = status.map(_.location.host)
-    val hostId = 0
-    val hostNum = hosts.size
-    val dists = new mutable.HashMap[Tuple2[String, String], Int]()
-    for (reduceloc <- hosts) {
-      for (maploc <- hosts) {
-        computeHostDist(maploc, reduceloc,dists)
-      }
-    }
-    println(dists)
-    hostDist = dists
-  }
-
-  def computeCost(shuffleId: Int): Array[Long] = {
-    val statuses = mapStatuses.get(shuffleId).orNull
-
     if (statuses != null) {
       statuses.synchronized {
         if (statuses.nonEmpty) {
           val mapNum = statuses.length
           val reduceNum = statuses(0).reduceNum
-          println("reduceNum: "+reduceNum)
           var mapIdx = 0
-          //val reduceToMapDataSize = Array.ofDim[Long](reduceNum, mapNum)
           val reduceData = new Array[Long](reduceNum)
-          //val reduceToDataSize = new mutable.HashMap[Int, Long]()
-          //[map1, map2, map3, map4, ...]
-          //val reduceToDataSize = new Array[Tuple2[Int, Long]](reduceNum)
+
           val hostSet = mutable.Set[String]()
-          //val mapToHost = new Array[String](mapNum)
           while (mapIdx < mapNum) {
             // status is a MapStatus
             val status = statuses(mapIdx)
@@ -674,311 +515,32 @@ private[spark] class MapOutputTrackerMaster(conf: SparkConf,
               for (reducerId <- 0 until reduceNum) {
                 val blockSize = status.getSizeForBlock(reducerId)
                 if (blockSize > 0) {
-                  //[nodeloc,size]
-                  //println("Map" + mapIdx + " to Reduce " + reducerId + " Output is :" + blockSize + " on " + status.location.toString)
-                  //reduceToMapDataSize(reducerId)(mapIdx) = blockSize
+
                   reduceData(reducerId) += blockSize
-                  //reduceToDataSize(reducerId) = reduceToDataSize.getOrElse(reducerId, 0L) + blockSize
-                  //reduceToDataSize.toArray.sortBy(_._2);
-                  //locs(status.location.host) = locs.getOrElse(status.location.host, 0L) + blockSize
-                  //totalOutputSize += blockSize
-                  //reduceToDataSize(reducerId) = new Tuple2[Int, Long](reducerId,reduceToDataSize(reducerId)._2 + blockSize)
+
                 }
               }
             }
             mapIdx = mapIdx + 1
           }
 
-//          val hostId = 0
-//          val hostNum = hostSet.size
-//          val hostDist = new mutable.HashMap[Tuple2[String, String], Int]()
-//          for (reduceloc <- hostSet) {
-//            for (maploc <- hostSet) {
-//              computeHostDist(maploc, reduceloc,hostDist)
-//              }
-//          }
-          println("For Shuffle " + shuffleId + ":")
+          logInfo("=============computeReduceDistribution: For Shuffle " + shuffleId + ": ============")
           for(i <- 0 to reduceNum - 1){
-            println("Reduce " + i + ": " + reduceData(i))
+            logInfo("==============Reduce " + i + ": " + reduceData(i)+"=================")
           }
           val avg = reduceData.sum.toFloat/reduceNum
 
           val s2 = (reduceData.map(size => (size - avg)*(size - avg)).sum)/reduceNum
 
-          println("Standard Deviation: " + (math.sqrt(s2)).toFloat)
-          return reduceData
+          val fos =  ((math.sqrt(s2))/avg)
 
-          //
+          logInfo("=============Standard Deviation: " + fos + "================")
+          return reduceData
         }
       }
     }
     Array.empty
-
   }
-  def computCostAmongHosts(maploc: String,
-                            reduceloc: String,
-                            locs: HashMap[String, Long] ): Long = {
-    if (maploc == reduceloc) {
-      //dists(maploc) = dists.getOrElse(maploc)
-      //dists.put(maploc, 0)
-      return 0L
-
-    } else {
-      val mapRack = structureUtil.getRackForHost(maploc)
-      val reduceRack = structureUtil.getRackForHost(reduceloc)
-      if (!mapRack.isEmpty && !reduceRack.isEmpty) {
-        if (mapRack == reduceRack) {
-          //dists.put(maploc, 1)
-          return locs(maploc)
-          //cost = cost + locs(maploc)
-        } else {
-          val mapCluster = structureUtil.getClusterForRack(mapRack)
-          val reduceCluster = structureUtil.getClusterForRack(reduceRack)
-          //                    println("map: " + mapRack + "->" + mapCluster)
-          //                    println("redcue: " + reduceRack + "->" + reduceCluster)
-
-          if (!mapCluster.isEmpty && !reduceCluster.isEmpty) {
-            if (mapCluster == reduceCluster) {
-              //同cluster
-             // dists.put(maploc, 2)
-              return locs(maploc) * 2
-            } else {
-              val mapCenter = structureUtil.getCenterForCluster(mapCluster)
-              val reduceCenter = structureUtil.getCenterForCluster(reduceCluster)
-              if(!mapCenter.isEmpty && !reduceCenter.isEmpty){
-                if(mapCenter == reduceCenter){
-                  //dists.put(maploc, 3)
-                  return locs(maploc) * 3
-                } else{
-                  //dists.put(maploc, 4)
-                  return locs(maploc) * 4
-                }
-              }else{
-                logWarning("The Center for Cluster " + mapCluster + " or " + reduceCluster + " cannot be found in Configuration")
-                //dists.put(maploc, 3)
-                return locs(maploc) * 3
-              }
-            }
-          }else{
-            logWarning("The Cluster for Rack " + mapRack + " or " + reduceRack + " cannot be found in Configuration")
-            //dists.put(maploc, 2)
-            return locs(maploc) * 2
-          }
-
-        }
-      }else{
-        logWarning("The Rack for Host " + maploc + " or " + reduceloc + " cannot be found in Configuration")
-        //dists.put(maploc, 1)
-        return locs(maploc) * 1
-      }
-    }
-  }
-
-  def getReduceDataDistribute(statuses: Array[MapStatus],
-                              reducerId: Int): HashMap[String,Long]= {
-
-    var mapIdx = 0
-    val locs = new HashMap[String, Long]
-    while (mapIdx < statuses.length) {
-      val status = statuses(mapIdx)
-
-      // status may be null here if we are called between registerShuffle, which creates an
-      // array with null entries for each output, and registerMapOutputs, which populates it
-      // with valid status entries. This is possible if one thread schedules a job which
-      // depends on an RDD which is currently being computed by another thread.
-      if (status != null) {
-        val blockSize = status.getSizeForBlock(reducerId)
-        if (blockSize > 0) {
-          //[nodeloc,size]
-          logInfo("=========Map" + mapIdx + " to Reduce " + reducerId + " Output is :" + blockSize + " on " + status.location.toString+ "=========")
-          locs(status.location.host) = locs.getOrElse(status.location.host, 0L) + blockSize
-          //totalOutputSize += blockSize
-        }
-      }
-      mapIdx = mapIdx + 1
-    }
-    return locs
-  }
-  def getHostsWithSmallestCost(
-                                shuffleId: Int,
-                                reducerId: Int)
-  : Option[Array[String]] = {
-    logInfo("use getHostsWithSmallestCost")
-    val statuses = mapStatuses.get(shuffleId).orNull
-    if (statuses != null) {
-      statuses.synchronized {
-        if (statuses.nonEmpty) {
-          // HashMap to add up sizes of all blocks at the same location
-//          val locs = new HashMap[String, Long]
-//          val hostSet = mutable.Set[String]()
-          val locs = getReduceDataDistribute(statuses, reducerId)
-
-          //val nodelist = statuses.map(_.location.host).distinct
-          val loctoDistance = new HashMap[String, Array[String]]
-          val hostSet = locs.keySet
-          var totalCost = 0L
-          val costs = new HashMap[String, Long]
-          for (reduceloc <- hostSet) {
-            var cost = 0L
-            val dists = new HashMap[String, Int]
-            for (maploc <- hostSet) {
-              cost = cost + computCostAmongHosts(maploc, reduceloc, locs)
-            }
-            costs.put(reduceloc, cost)
-            totalCost += cost
-            logInfo("=======Reduce " + reducerId + " locate at " + reduceloc.toString + " with Cost :" + cost + "=======")
-          }
-          //val topLocs = costs.toList.sortBy(_._2).take(4).map(_._1)
-          val avgcost = totalCost / hostSet.size
-          val topLocs = costs.filter{  case(loc, cost) =>
-            cost <= avgcost
-          }.toList.sortBy(_._2).map(_._1)
-
-          //          val topLocs = locs.filter { case (loc, size) =>
-          //            size.toDouble / totalOutputSize >= fractionThreshold
-          //          }
-          // Return if we have any locations which satisfy the required threshold
-          if (topLocs.nonEmpty) {
-            //return Some(topLocs.keys.toArray)
-            return Some(topLocs.toArray)
-          }
-
-        }
-      }
-    }
-    None
-  }
-
-
-
-
-//  def getHostsWithSmallestCost(
-//    shuffleId: Int,
-//    reducerId: Int)
-//  : Option[Array[String]] = {
-//    println("use getHostsWithSmallestCost")
-//    val statuses = mapStatuses.get(shuffleId).orNull
-//    if (statuses != null) {
-//      statuses.synchronized {
-//        if (statuses.nonEmpty) {
-//          // HashMap to add up sizes of all blocks at the same location
-//          val locs = new HashMap[String, Long]
-//          var totalCost = 0L
-//          var mapIdx = 0
-//
-//          while (mapIdx < statuses.length) {
-//            val status = statuses(mapIdx)
-//            // status may be null here if we are called between registerShuffle, which creates an
-//            // array with null entries for each output, and registerMapOutputs, which populates it
-//            // with valid status entries. This is possible if one thread schedules a job which
-//            // depends on an RDD which is currently being computed by another thread.
-//            if (status != null) {
-//              val blockSize = status.getSizeForBlock(reducerId)
-//              if (blockSize > 0) {
-//                //[nodeloc,size]
-//                println("Map" + mapIdx + " to Reduce " + reducerId + " Output is :" + blockSize + " on " + status.location.toString)
-//                locs(status.location.host) = locs.getOrElse(status.location.host, 0L) + blockSize
-//                //totalOutputSize += blockSize
-//              }
-//            }
-//            mapIdx = mapIdx + 1
-//          }
-//          //map task的位置列表
-//          //val nodelist = statuses.map(_.location.host).distinct
-//          val loctoDistance = new HashMap[String, Array[String]]
-//          val hostlist = locs.keySet
-//          val costs = new HashMap[String, Long]
-//          for (reduceloc <- hostlist) {
-//            var cost = 0L
-//            val dists = new HashMap[String, Int]
-//            for (maploc <- hostlist) {
-//              if (maploc == reduceloc) {
-//                //同node
-//                //dists(maploc) = dists.getOrElse(maploc)
-//                dists.put(maploc, 0)
-//
-//              } else {
-//                val mapRack = structureUtil.getRackForHost(maploc)
-//                val reduceRack = structureUtil.getRackForHost(reduceloc)
-//                if (!mapRack.isEmpty && !reduceRack.isEmpty) {
-//                  if (mapRack == reduceRack) {
-//                    //同rack
-//                    dists.put(maploc, 1)
-//                    cost = cost + locs(maploc)
-//                    //cost = cost + locs(maploc)
-//                  } else {
-//                    val mapCluster = structureUtil.getClusterForRack(mapRack)
-//                    val reduceCluster = structureUtil.getClusterForRack(reduceRack)
-////                    println("map: " + mapRack + "->" + mapCluster)
-////                    println("redcue: " + reduceRack + "->" + reduceCluster)
-//
-//                    if (!mapCluster.isEmpty && !reduceCluster.isEmpty) {
-//                      if (mapCluster == reduceCluster) {
-//                        //同cluster
-//                        dists.put(maploc, 2)
-//                        cost = cost + locs(maploc) * 2
-//                      } else {
-//                        val mapCenter = structureUtil.getCenterForCluster(mapCluster)
-//                        val reduceCenter = structureUtil.getCenterForCluster(reduceCluster)
-//                        if(!mapCenter.isEmpty && !reduceCenter.isEmpty){
-//                          if(mapCenter == reduceCenter){
-//                            //同center
-//                            dists.put(maploc, 3)
-//                            cost = cost + locs(maploc) * 3
-//                          } else{
-//                          //不同center
-//                          dists.put(maploc, 4)
-//                          cost = cost + locs(maploc) * 4
-//                          }
-//                        }else{
-//                          //如果找不到相应cluster所属的cluster，默认其在同一个center
-//                          logWarning("The Center for Cluster " + mapCluster + " or " + reduceCluster + " cannot be found in Configuration")
-//                          dists.put(maploc, 3)
-//                          cost = cost + locs(maploc) * 3
-//                        }
-//                      }
-//                    }else{
-//                      //如果找不到相应rack所属的cluster，默认其在同一个cluster
-//                      logWarning("The Cluster for Rack " + mapRack + " or " + reduceRack + " cannot be found in Configuration")
-//                      dists.put(maploc, 2)
-//                      cost = cost + locs(maploc) * 2
-//                    }
-//
-//                  }
-//                }else{
-//                  //如果找不到相应host所属的rack，默认其在同一个rack
-//                  logWarning("The Rack for Host " + maploc + " or " + reduceloc + " cannot be found in Configuration")
-//                  dists.put(maploc, 1)
-//                  cost = cost + locs(maploc) * 1
-//                }
-//              }
-//
-//            }
-//            costs.put(reduceloc, cost)
-//            totalCost += cost
-//            logInfo("Reduce " + reducerId + " locate at " + reduceloc.toString + " with Cost :" + cost)
-//          }
-//          //取大于平均值的cost
-//          //val topLocs = costs.toList.sortBy(_._2).take(4).map(_._1)
-//          val avgcost = totalCost / statuses.length
-//          val topLocs = costs.filter{  case(loc, cost) =>
-//              cost <= avgcost
-//          }.toList.sortBy(_._2).map(_._1)
-//
-//          //          val topLocs = locs.filter { case (loc, size) =>
-//          //            size.toDouble / totalOutputSize >= fractionThreshold
-//          //          }
-//          // Return if we have any locations which satisfy the required threshold
-//          if (topLocs.nonEmpty) {
-//            //return Some(topLocs.keys.toArray)
-//            return Some(topLocs.toArray)
-//          }
-//
-//        }
-//      }
-//    }
-//    None
-//  }
 
   def incrementEpoch() {
     epochLock.synchronized {
@@ -1189,171 +751,5 @@ private[spark] object MapOutputTracker extends Logging {
     }
 
     splitsByAddress.toSeq
-  }
-}
-object FakeRackAndClusterUtil {
-  private val hostToRack = new mutable.HashMap[String, String]()
-  private val rackToCluster = new mutable.HashMap[String, String]()
-
-  def cleanUp() {
-    hostToRack.clear()
-    rackToCluster.clear()
-  }
-
-  def assignHostToRack(host: String, rack: String) {
-    hostToRack(host) = rack
-  }
-
-  def getRackForHost(host: String): Option[String] = {
-    hostToRack.get(host)
-  }
-
-  def assignRackToCluster(rack: String, cluster: String) {
-    rackToCluster(rack) = cluster
-  }
-
-  def getClusterForRack(rack: String): Option[String] = {
-    rackToCluster.get(rack)
-  }
-}
-
-class StructureUtil(conf :SparkConf) {
-  private val hostToRack = new mutable.HashMap[String, String]()
-  private val rackToCluster = new mutable.HashMap[String, String]()
-  private val clusterToCenter = new mutable.HashMap[String, String]()
-  //private val centerName = new ArrayBuffer[String]()
-
-  val hostsForRack: List[Array[String]] = {
-    val hostconf = conf.get("spark.structure.hostsforrack","")
-    if(!hostconf.isEmpty){
-      //println(hostconf)
-      hostconf.split("\\(|\\)").filter(!_.isEmpty).map(hosts => hosts.split(",")).toList
-    }else{
-      Nil
-    }
-  }
-  val racksForCluster: List[Array[String]] = {
-    val rackconf = conf.get("spark.structure.racksforcluster","")
-      if(!rackconf.isEmpty){
-        rackconf.split("\\(|\\)").filter(!_.isEmpty).map(racks => racks.split(",")).toList
-      }else{
-        Nil
-      }
-  }
-  val clustersForCenter: List[Array[String]] = {
-    val clusterconf = conf.get("spark.structure.clustersforcenter","")
-      if(!clusterconf.isEmpty){
-        clusterconf.split("\\(|\\)").filter(!_.isEmpty).map(clusters => clusters.split(",")).toList
-      }else{
-        Nil
-      }
-  }
-  val centerName: List[String] = {
-    val centerconf = conf.get("spark.structure.centername","")
-    if(!centerconf.isEmpty){
-      centerconf.split(",").toList
-    }else{
-      Nil
-    }
-  }
-
-  if(hostsForRack != Nil){
-    if(racksForCluster != Nil){
-      val racks = racksForCluster.flatten.toArray
-      var rackId = 0;
-      for(hostlist <- hostsForRack){
-        //println(racks(rackid))
-        for(host <- hostlist){
-          println(host)
-          hostToRack.put(host, racks(rackId))
-        }
-        rackId = rackId + 1
-      }
-      if(clustersForCenter!=Nil){
-        val clusters = clustersForCenter.flatten.toArray
-        var clusterId = 0
-        for(racklist <- racksForCluster){
-          for(rack <- racklist) {
-            rackToCluster.put(rack, clusters(clusterId))
-          }
-          clusterId = clusterId + 1;
-        }
-        if(centerName!=Nil){
-          var centerId = 0
-          for(clusterlist <- clustersForCenter) {
-            for (cluster <- clusterlist) {
-              clusterToCenter.put(cluster, centerName(0))
-            }
-            clusterId = clusterId + 1;
-          }
-        }else{
-          var centerId = 1
-          for(clusterlist <- clustersForCenter){
-            for(cluster <- clusterlist) {
-              clusterToCenter.put(cluster, "center" + (centerId).toString)
-            }
-            clusterId = clusterId + 1;
-          }
-        }
-
-      }else{
-        var clusterId = 1
-        for(racklist <- racksForCluster){
-          for(rack <- racklist) {
-            rackToCluster.put(rack, "cluster" + clusterId.toString)
-          }
-          clusterId = clusterId + 1;
-        }
-      }
-    }else{
-      //如果未配置racks -> cluster，则按括号分割，依次为rack1, rack2, rack3
-      var rackId = 1;
-      for(hostlist <- hostsForRack){
-        //println(racks(rackid))
-        for(host <- hostlist){
-          hostToRack.put(host, "rack" + (rackId).toString)
-        }
-        rackId = rackId + 1
-      }
-
-    }
-
-  }
-
-  hostToRack.foreach(println)
-  println()
-  rackToCluster.foreach(println)
-  println()
-  clusterToCenter.foreach(println)
-
-
-
-  def cleanUp() {
-    hostToRack.clear()
-    rackToCluster.clear()
-    clusterToCenter.clear()
-  }
-  private val NullStr: String = ""
-  def assignHostToRack(host: String, rack: String) {
-    hostToRack(host) = rack
-  }
-
-  def getRackForHost(host: String): String = {
-    hostToRack.getOrElse(host,NullStr)
-  }
-
-  def assignRackToCluster(rack: String, cluster: String) {
-    rackToCluster(rack) = cluster
-  }
-
-  def getClusterForRack(rack: String): String = {
-    rackToCluster.getOrElse(rack,NullStr)
-  }
-  def assignClusterToCenter(cluster: String, center: String) {
-    clusterToCenter(cluster) = center
-  }
-
-  def getCenterForCluster(cluster: String): String = {
-    clusterToCenter.getOrElse(cluster,NullStr)
   }
 }
