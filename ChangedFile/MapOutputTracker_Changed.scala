@@ -116,7 +116,6 @@ private[spark] abstract class MapOutputTracker(conf: SparkConf) extends Logging 
         "Error reply received from MapOutputTracker. Expecting true, got " + response.toString)
     }
   }
-
   /**
    * Called from executors to get the server URIs and output sizes for each shuffle block that
    * needs to be read from a given reduce task.
